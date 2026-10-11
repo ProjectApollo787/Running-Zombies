@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Zombie Run</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=IBM+Plex+Sans:wght@400;600&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet">
+<style>
+/* Layout: una sola pantalla, número grande arriba, pista de persecución, controles abajo */
+:root{
+  --bg:#12160f; --panel:#1c2218; --fg:#e8eadf; --muted:#8f9a84;
+  --accent:#9bd14a; --danger:#e0533d; --line:#2c3427;
+  --display:"Bebas Neue",Impact,"Arial Narrow",sans-serif;
+  --body:"IBM Plex Sans",system-ui,-apple-system,sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--fg);font-family:var(--body);
+  padding:env(safe-area-inset-top,0) 16px env(safe-area-inset-bottom,0)}
+main{max-width:480px;margin:0 auto;padding-block:20px;display:flex;flex-direction:column;gap:18px;min-height:100%}
+h1{font-family:var(--display);font-size:2.2rem;letter-spacing:.04em;margin:0;line-height:1}
+.status{font-size:.85rem;color:var(--muted)}
+.speed{text-align:center;padding-block:8px}
+.speed .num{font-family:var(--display);font-size:7rem;line-height:.9;font-variant-numeric:tabular-nums}
+.speed .unit{font-size:.8rem;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.stat{background:var(--panel);border-radius:10px;padding:10px;text-align:center}
+.stat b{display:block;font-family:var(--mono);font-size:1.25rem;font-variant-numeric:tabular-nums}
+.stat span{font-size:.7rem;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+.chase{background:var(--panel);border-radius:10px;padding:14px;display:flex;flex-direction:column;gap:10px}
+.chase.danger{outline:2px solid var(--danger)}
+.track{position:relative;height:34px;border-bottom:2px dashed var(--line)}
+.track i{position:absolute;bottom:2px;font-style:normal;font-size:1.6rem;transition:left .8s linear;transform:translateX(-50%)}
+.gap{font-family:var(--mono);font-size:.95rem}
+.gap.danger{color:var(--danger)}
+label{font-size:.85rem;color:var(--muted);display:flex;justify-content:space-between;align-items:center;gap:10px}
+select{font:inherit;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:6px}
+.btns{display:flex;gap:10px;margin-top:auto}
+button{flex:1;font-family:var(--display);font-size:1.6rem;letter-spacing:.06em;border:0;border-radius:12px;padding:16px;cursor:pointer}
+#start{background:var(--accent);color:#12160f}
+#stop{background:var(--panel);color:var(--fg)}
+button:focus-visible,select:focus-visible{outline:3px solid var(--fg);outline-offset:2px}
+button:disabled{opacity:.4}
+.note{font-size:.75rem;color:var(--muted);line-height:1.5}
+@media (prefers-reduced-motion:reduce){.track i{transition:none}}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Zombie Run</h1>
+    <div class="status" id="status">Listo. Toca EMPEZAR y acepta el permiso de ubicación.</div>
+  </header>
+
+  <section class="speed">
+    <div class="num" id="speed">0.0</div>
+    <div class="unit">millas por hora</div>
+  </section>
+
+  <section class="stats">
+    <div class="stat"><b id="dist">0.00</b><span>millas</span></div>
+    <div class="stat"><b id="time">0:00</b><span>tiempo</span></div>
+    <div class="stat"><b id="steps">0</b><span>pasos (est.)</span></div>
+  </section>
+
+  <section class="chase" id="chase">
+    <div class="track"><i id="zombie" style="left:5%">🧟</i><i id="runner" style="left:85%">🏃</i></div>
+    <div class="gap" id="gap">Zombie a 100 m detrás de ti</div>
+    <label for="zspeed">Velocidad del zombie
+      <select id="zspeed">
+        <option value="2.5">Lento · 2.5 mph</option>
+        <option value="4" selected>Caminando rápido · 4 mph</option>
+        <option value="5.5">Trote · 5.5 mph</option>
+        <option value="7">Corriendo · 7 mph</option>
+      </select>
+    </label>
+  </section>
+
+  <div class="btns">
+    <button id="start">EMPEZAR</button>
+    <button id="stop" disabled>PARAR</button>
+  </div>
+
+  <p class="note">La velocidad viene del GPS. Los pasos son un estimado (distancia ÷ largo de zancada de ~0.75 m). Mantén la pantalla encendida para que el GPS siga actualizando.</p>
+</main>
+
+<script>
+const MPS_TO_MPH = 2.23694, M_TO_MI = 1/1609.34, STRIDE_M = 0.75, START_GAP = 100;
+const $ = id => document.getElementById(id);
+let watchId = null, last = null, distM = 0, startT = 0, timer = null, gapM = START_GAP, lastTick = 0, wakeLock = null, curMps = 0;
+
+function haversine(a, b){
+  const R = 6371000, r = x => x*Math.PI/180;
+  const dLat = r(b.latitude-a.latitude), dLon = r(b.longitude-a.longitude);
+  const h = Math.sin(dLat/2)**2 + Math.cos(r(a.latitude))*Math.cos(r(b.latitude))*Math.sin(dLon/2)**2;
+  return 2*R*Math.asin(Math.sqrt(h));
+}
+
+function onPos(p){
+  const c = p.coords;
+  if (c.accuracy > 30) { $("status").textContent = `Buscando mejor señal GPS (±${Math.round(c.accuracy)} m)…`; return; }
+  $("status").textContent = `Corriendo · GPS ±${Math.round(c.accuracy)} m`;
+  if (last){
+    const d = haversine(last.coords, c), dt = (p.timestamp - last.timestamp)/1000;
+    if (d > 2 && d < 60) distM += d;            // ignora saltos de GPS
+    curMps = (c.speed != null && c.speed >= 0) ? c.speed : (dt > 0 ? d/dt : 0);
+  }
+  last = p;
+  render();
+}
+
+function onErr(e){
+  const msg = {1:"Permiso de ubicación denegado. Actívalo en Ajustes › Safari › Ubicación.",
+               2:"No se pudo obtener la ubicación.", 3:"El GPS tardó demasiado. Sigue intentando…"};
+  $("status").textContent = msg[e.code] || e.message;
+}
+
+function tick(){
+  const now = Date.now(), dt = (now - lastTick)/1000; lastTick = now;
+  const zMps = parseFloat($("zspeed").value) / MPS_TO_MPH;
+  gapM = Math.min(250, gapM + (curMps - zMps) * dt);
+  if (gapM <= 0){ gapM = 0; caught(); }
+  const s = Math.floor((now - startT)/1000);
+  $("time").textContent = `${Math.floor(s/60)}:${String(s%60).padStart(2,"0")}`;
+  render();
+}
+
+function render(){
+  $("speed").textContent = (curMps * MPS_TO_MPH).toFixed(1);
+  $("dist").textContent = (distM * M_TO_MI).toFixed(2);
+  $("steps").textContent = Math.round(distM / STRIDE_M).toLocaleString("es");
+  const pct = Math.max(0, Math.min(1, gapM / 200));
+  $("zombie").style.left = (85 - pct*80) + "%";
+  const danger = gapM < 30;
+  $("gap").textContent = gapM <= 0 ? "¡Te alcanzó!" : `Zombie a ${Math.round(gapM)} m detrás de ti`;
+  $("gap").classList.toggle("danger", danger);
+  $("chase").classList.toggle("danger", danger);
+}
+
+function caught(){
+  if (navigator.vibrate) navigator.vibrate([300,100,300]);
+  $("status").textContent = "¡Te alcanzó! Te damos 50 m de ventaja otra vez.";
+  gapM = 50;
+}
+
+async function start(){
+  if (!("geolocation" in navigator)){ $("status").textContent = "Este navegador no tiene GPS."; return; }
+  distM = 0; last = null; curMps = 0; gapM = START_GAP; startT = lastTick = Date.now();
+  watchId = navigator.geolocation.watchPosition(onPos, onErr, {enableHighAccuracy:true, maximumAge:0, timeout:15000});
+  timer = setInterval(tick, 1000);
+  try { wakeLock = await navigator.wakeLock?.request("screen"); } catch(_) {}
+  $("start").disabled = true; $("stop").disabled = false;
+  $("status").textContent = "Buscando GPS…";
+}
+
+function stop(){
+  if (watchId != null) navigator.geolocation.clearWatch(watchId);
+  clearInterval(timer); watchId = null; curMps = 0;
+  try { wakeLock?.release(); } catch(_) {}
+  $("start").disabled = false; $("stop").disabled = true;
+  $("status").textContent = `Terminaste: ${(distM*M_TO_MI).toFixed(2)} millas en ${$("time").textContent}.`;
+  render();
+}
+
+$("start").addEventListener("click", start);
+$("stop").addEventListener("click", stop);
+render();
+</script>
+</body>
+</html>
